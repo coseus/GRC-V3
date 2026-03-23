@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from app.db.session import get_session
@@ -61,6 +62,56 @@ def _build_assessment_metrics(answer_service, actor, assessment_id: int):
     }
 
 
+def _render_heatmap(rows):
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return
+
+    heat = df.pivot_table(
+        index="Framework",
+        values=["Adjusted Score", "Risk Score", "Answers"],
+        aggfunc="mean",
+    )
+
+    if heat.empty:
+        return
+
+    def color_score(value):
+        if pd.isna(value):
+            return ""
+        v = float(value)
+        if v >= 85:
+            return "background-color: #c6efce; color: #006100;"
+        if v >= 70:
+            return "background-color: #e2f0d9; color: #375623;"
+        if v >= 50:
+            return "background-color: #fff2cc; color: #7f6000;"
+        if v >= 30:
+            return "background-color: #fce4d6; color: #9c0006;"
+        return "background-color: #ffc7ce; color: #9c0006;"
+
+    def color_risk(value):
+        if pd.isna(value):
+            return ""
+        v = float(value)
+        if v >= 70:
+            return "background-color: #ffc7ce; color: #9c0006;"
+        if v >= 50:
+            return "background-color: #fce4d6; color: #9c0006;"
+        if v >= 30:
+            return "background-color: #fff2cc; color: #7f6000;"
+        return "background-color: #c6efce; color: #006100;"
+
+    styled = (
+        heat.style
+        .format({"Adjusted Score": "{:.1f}", "Risk Score": "{:.1f}", "Answers": "{:.0f}"})
+        .map(color_score, subset=["Adjusted Score"])
+        .map(color_risk, subset=["Risk Score"])
+    )
+
+    st.dataframe(styled, use_container_width=True)
+
+
 def render_framework_comparison_section(actor, company, lang):
     if not actor:
         st.error("Utilizator neautentificat.")
@@ -82,25 +133,31 @@ def render_framework_comparison_section(actor, company, lang):
         framework_options = sorted(
             {getattr(item, "framework_name", "") or "" for item in assessments if getattr(item, "framework_name", None)}
         )
-        selected_framework = st.selectbox(
-            "Filtru framework",
-            options=["Toate"] + framework_options,
-            index=0,
-            key=f"framework_compare_filter_{company.id}",
-        )
 
-        only_unlocked = st.checkbox(
-            "Arata doar evaluari nelocate",
-            value=False,
-            key=f"framework_compare_unlocked_{company.id}",
-        )
+        filter_col1, filter_col2, filter_col3 = st.columns(3)
 
-        sort_by = st.selectbox(
-            "Sortare dupa",
-            options=["Updated", "Adjusted Score", "Overall Score", "Risk Score", "Name"],
-            index=0,
-            key=f"framework_compare_sort_{company.id}",
-        )
+        with filter_col1:
+            selected_framework = st.selectbox(
+                "Filtru framework",
+                options=["Toate"] + framework_options,
+                index=0,
+                key=f"framework_compare_filter_{company.id}",
+            )
+
+        with filter_col2:
+            only_unlocked = st.checkbox(
+                "Arata doar evaluari nelocate",
+                value=False,
+                key=f"framework_compare_unlocked_{company.id}",
+            )
+
+        with filter_col3:
+            sort_by = st.selectbox(
+                "Sortare dupa",
+                options=["Updated", "Adjusted Score", "Overall Score", "Risk Score", "Name"],
+                index=0,
+                key=f"framework_compare_sort_{company.id}",
+            )
 
         reverse_sort = st.checkbox(
             "Sortare descrescatoare",
@@ -154,6 +211,19 @@ def render_framework_comparison_section(actor, company, lang):
         elif sort_by == "Name":
             rows.sort(key=lambda x: x["Name"] or "", reverse=reverse_sort)
 
+        scored_rows = [r for r in rows if r["Adjusted Score"] is not None]
+
+        if scored_rows:
+            best = max(scored_rows, key=lambda x: x["Adjusted Score"])
+            weakest = min(scored_rows, key=lambda x: x["Adjusted Score"])
+            highest_risk = max(scored_rows, key=lambda x: x["Risk Score"] if x["Risk Score"] is not None else -1)
+
+            st.write("### Highlights")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Best Framework", f"{best['Adjusted Score']:.1f}", best["Framework"])
+            c2.metric("Weakest Framework", f"{weakest['Adjusted Score']:.1f}", weakest["Framework"])
+            c3.metric("Highest Risk", f"{highest_risk['Risk Score']:.1f}", highest_risk["Framework"])
+
         clean_rows = []
         for row in rows:
             clean_rows.append(
@@ -174,22 +244,28 @@ def render_framework_comparison_section(actor, company, lang):
                 }
             )
 
+        st.write("### Comparison Table")
         st.dataframe(clean_rows, use_container_width=True)
 
-        scored_rows = [r for r in rows if r["Adjusted Score"] is not None]
         if scored_rows:
-            st.write("### Rezumat comparativ")
+            st.write("### Bar Chart Comparison")
+            chart_df = pd.DataFrame(
+                [
+                    {
+                        "Assessment": r["Name"],
+                        "Adjusted Score": r["Adjusted Score"],
+                        "Risk Score": r["Risk Score"],
+                    }
+                    for r in scored_rows
+                ]
+            ).set_index("Assessment")
 
-            best = max(scored_rows, key=lambda x: x["Adjusted Score"])
-            weakest = min(scored_rows, key=lambda x: x["Adjusted Score"])
-            highest_risk = max(scored_rows, key=lambda x: x["Risk Score"] if x["Risk Score"] is not None else -1)
+            st.bar_chart(chart_df, use_container_width=True)
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Cel mai bun scor", f"{best['Adjusted Score']:.1f}", best["Name"])
-            c2.metric("Cel mai slab scor", f"{weakest['Adjusted Score']:.1f}", weakest["Name"])
-            c3.metric("Cel mai mare risc", f"{highest_risk['Risk Score']:.1f}", highest_risk["Name"])
+            st.write("### Heatmap by Framework")
+            _render_heatmap(scored_rows)
 
-            st.write("### Comparatie rapida")
+            st.write("### Quick Summary")
             summary_rows = []
             for row in scored_rows:
                 summary_rows.append(
